@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "elf.h"
 
 struct {
   struct spinlock lock;
@@ -531,4 +532,86 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+int forknexec(const char *path, const char **args) {
+    int i, pid;
+    struct proc *np;
+    struct proc *curproc = myproc();
+
+    // Allocate process.
+    if((np = allocproc()) == 0){
+      return -2;
+    }
+
+    // Copy process state from proc.
+    if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
+      kfree(np->kstack);
+      np->kstack = 0;
+      np->state = UNUSED;
+      return -2;
+    }
+    np->sz = curproc->sz;
+    np->parent = curproc;
+    *np->tf = *curproc->tf;
+
+    // set %eax so that fork returns child's pid in the child.
+    np->tf->eax = np->pid;
+
+    for(i = 0; i < NOFILE; i++)
+      if(curproc->ofile[i])
+        np->ofile[i] = filedup(curproc->ofile[i]);
+    np->cwd = idup(curproc->cwd);
+
+    safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+    pid = np->pid;
+
+    acquire(&ptable.lock);
+
+    np->state = RUNNABLE;
+
+    release(&ptable.lock);
+
+    // wait child process finish
+    wait();
+
+    struct elfhdr elf;
+    struct inode *ip;
+    pde_t *pgdir;
+
+    /* check argument error */
+    if((ip = namei((char*)path)) == 0){
+      cprintf("exec: fail\n");
+      return -1;
+    }
+    ilock(ip);
+    pgdir = 0;
+
+    // Check ELF header
+    if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
+      goto bad;
+    if(elf.magic != ELF_MAGIC)
+      goto bad;
+
+    if(pgdir)
+      freevm(pgdir);
+    if(ip) {
+      iunlockput(ip);
+    }
+    /*************************/
+
+    // run exec() from parent
+    exec((char*)path, (char**)args);
+
+    return pid;
+
+bad: // argument error
+    if(pgdir)
+      freevm(pgdir);
+    if(ip) {
+      iunlockput(ip);
+    }
+
+    return -1;
 }
